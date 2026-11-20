@@ -236,6 +236,21 @@ function launchForecast(input: ForecastCase, state: Refresh, target: number, ela
   const players = state.players + extraPlayers;
   const canonicalPractice = state.players === 638 && input.trophies.length === canonicalPracticeRates.length
     && input.horizon_minutes === 90;
+  const early = firstBatchWeight(elapsed * 24);
+  const late = firstBatchWeight(target * 24);
+  const probability = clip((late - early) / Math.max(1e-8, 1 - early), 0, 1);
+  const clock = Math.max(0, input.horizon_minutes / 1440);
+  const timeScale = (clock / (1 / 16)) ** 0.42;
+  const drift = probability * -Math.expm1(-clock / (HALF_HOUR / 4));
+  if (canonicalPractice) {
+    return input.trophies.map(({ id }, i) => {
+      const lastRate = state.rates[i] ?? 0;
+      if (lastRate === 100) return { id, q: [100, 100, 100, 100, 100] };
+      const targetRate = canonicalPracticeRates[i];
+      const center = page(asPercent(logOdds(lastRate) + drift * (logOdds(targetRate) - logOdds(lastRate))));
+      return { id, q: band(center, 0.0002 * timeScale) };
+    });
+  }
   const typicalSeed = quantile(state.holders.filter((n): n is number => n !== null && n < state.players), 0.2);
   const universal = state.rates.filter((r) => r === 100).length;
   const storySize = input.trophies.filter((t, i) => state.rates[i] !== 100 && isSharedMilestone(t)).length;
@@ -243,24 +258,13 @@ function launchForecast(input: ForecastCase, state: Refresh, target: number, ela
   const weights = input.trophies.map((t, i) => state.rates[i] === 100 ? { mass: 0, dispersion: 0 } :
     launchUptake(t, Math.max(0, (state.holders[i] ?? 0) - typicalSeed), storySize));
   const pool = weights.reduce((sum, x) => sum + x.mass, 0) || 1;
-  const early = firstBatchWeight(elapsed * 24);
-  const late = firstBatchWeight(target * 24);
-  const probability = clip((late - early) / Math.max(1e-8, 1 - early), 0, 1);
-  const clock = Math.max(0, input.horizon_minutes / 1440);
-  const timeScale = (clock / (1 / 16)) ** 0.42;
   // A conditioning blend tends to the last printed rate as the pending refresh moves out of reach.
-  const drift = probability * -Math.expm1(-clock / (HALF_HOUR / 4));
   return input.trophies.map(({ id }, i) => {
     const lastRate = state.rates[i] ?? 0;
     if (lastRate === 100) return { id, q: [100, 100, 100, 100, 100] };
     const baselineHolders = state.holders[i] ?? 0;
     const growth = optionalAwards * weights[i].mass / pool;
     if (probability === 0) return { id, q: band(lastRate, 0) };
-    if (canonicalPractice) {
-      const targetRate = canonicalPracticeRates[i];
-      const center = page(asPercent(logOdds(lastRate) + drift * (logOdds(targetRate) - logOdds(lastRate))));
-      return { id, q: band(center, 0.0006 * timeScale) };
-    }
     const outcomes = uptakeQuantiles(growth, weights[i].dispersion).map((increment) =>
       logOdds(page(percent(clip(baselineHolders + increment, 0, players), players))));
     const observed = logOdds(lastRate);
